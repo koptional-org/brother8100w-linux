@@ -113,7 +113,7 @@ The official Brother Linux driver **does not support two-color (red/black) DK-22
 
 ### Solution: brother_ql
 
-Use the `brother_ql` Python library, which bypasses CUPS and talks directly to the printer. It fully supports two-color printing on the QL-810W.
+Use the `brother_ql` Python library, which generates the two-color raster data the printer expects.
 
 #### Install
 
@@ -128,45 +128,54 @@ source ~/brother_ql_env/bin/activate
 pip install brother_ql
 ```
 
-#### Discover the Printer
+#### Print an Image (Two-Color) — Preferred: raw CUPS, no sudo
+
+Generate the raster instructions with `brother_ql_create` (no USB access needed), then send the raw bytes through the existing CUPS queue. CUPS runs as root and handles the USB transport, and `-o raw` bypasses the Brother filter that produces the rejected single-color data:
+
+```bash
+brother_ql_create -m QL-810W -s 62red --red /path/to/image.png /tmp/label.bin
+lp -d QL810W -o raw /tmp/label.bin
+```
+
+- `-s 62red` tells it you have 62mm two-color tape loaded
+- `--red` enables two-color mode
+- Red pixels in the source image print in red; everything else prints in black
+- Image should be 696px wide (62mm at 300dpi)
+
+#### Alternative: direct USB with pyusb (requires sudo)
 
 ```bash
 brother_ql -b pyusb discover
-```
+# usb://0x04f9:0x209c
 
-Output:
-```
-usb://0x04f9:0x209c
-```
-
-#### Print an Image (Two-Color)
-
-```bash
 sudo $(which brother_ql) -b pyusb -m QL-810W -p usb://0x04f9:0x209c \
   print -l 62red --red /path/to/image.png
 ```
 
-- `-l 62red` tells it you have 62mm two-color tape loaded
-- `--red` enables two-color mode
-- Red pixels in the source image print in red; everything else prints in black
-- `sudo` is required for USB access
+To avoid sudo permanently, add yourself to the `lp` group and add a udev rule:
+```bash
+sudo usermod -aG lp $USER
+echo 'SUBSYSTEM=="usb", ATTRS{idVendor}=="04f9", ATTRS{idProduct}=="209c", GROUP="lp", MODE="0660"' \
+  | sudo tee /etc/udev/rules.d/99-brother-ql810w.rules
+sudo udevadm control --reload && sudo udevadm trigger
+```
 
 #### Print a PDF (Two-Color)
 
-Convert the PDF to an image first, resize to 696px wide (62mm at 300dpi), then print:
+Convert the PDF to an image first, resize to 696px wide (62mm at 300dpi), then print. Use `-monochrome` to dither grayscale content (e.g. gray logos) — a hard threshold can drop light grays entirely:
 
 ```bash
-pdftoppm -r 300 -png yourfile.pdf /tmp/label_page
-convert /tmp/label_page-1.png -resize 696x /tmp/label_resized.png
-sudo $(which brother_ql) -b pyusb -m QL-810W -p usb://0x04f9:0x209c \
-  print -l 62red --red /tmp/label_resized.png
+pdftoppm -r 300 -png -gray yourfile.pdf /tmp/label_page
+convert /tmp/label_page-1.png -resize 696x -monochrome /tmp/label_resized.png
+brother_ql_create -m QL-810W -s 62red --red /tmp/label_resized.png /tmp/label.bin
+lp -d QL810W -o raw /tmp/label.bin
 ```
 
 #### Print an Image (Single-Color, 62mm)
 
 ```bash
-sudo $(which brother_ql) -b pyusb -m QL-810W -p usb://0x04f9:0x209c \
-  print -l 62 /path/to/image.png
+brother_ql_create -m QL-810W -s 62 /path/to/image.png /tmp/label.bin
+lp -d QL810W -o raw /tmp/label.bin
 ```
 
 ### brother_ql Label Sizes
@@ -188,10 +197,26 @@ Full list: `brother_ql info labels`
 Editor Lite mode is on. Press the Editor Lite button on the printer to turn it off (yellow light should go out). Unplug and replug USB.
 
 ### Red flashing power light
-Media mismatch. The paper size setting doesn't match the tape loaded. Make sure `-l` (brother_ql) or `-o media=` (CUPS) matches your tape. If using DK-2251 two-color tape, you **must** use `brother_ql` with `-l 62red --red`.
+Media mismatch. The paper size setting doesn't match the tape loaded. Make sure the label size (brother_ql) or `-o media=` (CUPS) matches your tape. If using DK-2251 two-color tape, you **must** print via `brother_ql` raster data (`-s 62red --red`) — anything through the CUPS Brother filter is rejected.
+
+Note: a new QL-810W ships with a DK-2251 starter roll, so an out-of-the-box printer hits this immediately if you print through CUPS. Also note CUPS reports such jobs as "completed" — it only knows the bytes were delivered, not that the printer refused them.
+
+While the light is flashing, the printer also stops answering status requests; power-cycle it to clear the error state.
 
 ### "Waiting for printer to become available"
-USB connection lost. Unplug and replug the USB cable. Verify with `ls -l /dev/usb/lp*`.
+Two known causes:
+
+1. **USB connection lost.** Unplug and replug the USB cable. Verify with `ls -l /dev/usb/lp*`.
+2. **Replaced printer unit (serial mismatch).** The CUPS queue's device URI is pinned to a specific serial number. If you swap in a different QL-810W (e.g. a replacement unit), CUPS waits forever for the old one. Compare the queue's serial against the connected printer:
+   ```bash
+   lpoptions -p QL810W | grep -o 'device-uri=[^ ]*'
+   cat /sys/bus/usb/devices/*/serial   # alongside: cat /sys/bus/usb/devices/*/product
+   ```
+   Then repoint the queue (no sudo needed if you're in the `lpadmin` group):
+   ```bash
+   lpadmin -p QL810W -v "usb://Brother/QL-810W?serial=NEW_SERIAL"
+   ```
+   Stuck jobs restart automatically after the queue is modified.
 
 ### AppArmor DENIED errors in dmesg
 See Step 3 above.
